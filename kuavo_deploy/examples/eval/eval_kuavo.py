@@ -234,8 +234,8 @@ def main(config_path: str, env: gym.Env):
 
                 # 相机帧记录
 
-                for k in cam_keys:
-                    frame_map[k].append(observation[k].squeeze(0).cpu().numpy().transpose(1, 2, 0))
+                #for k in cam_keys:
+                #    frame_map[k].append(observation[k].squeeze(0).cpu().numpy().transpose(1, 2, 0))
 
                 # The rollout is considered done when the success state is reached (i.e. terminated is True),
                 # or the maximum number of iterations is reached (i.e. truncated is True)
