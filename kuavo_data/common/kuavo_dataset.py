@@ -198,6 +198,15 @@ class KuavoMsgProcesser:
         return {"data": np.deg2rad(msg.position), "timestamp": msg.header.stamp.to_sec()}
     
     @staticmethod
+    def process_cmd_pos_world(msg):    #cmd_pose_world处理函数
+        linear = [msg.twist.linear.x, msg.twist.linear.y]
+        angular = [msg.twist.angular.z]
+        
+        twist_data = linear + angular
+        
+        return {"data": twist_data, "timestamp": msg.header.stamp.to_sec()}
+
+    @staticmethod
     def process_claw_state(msg):
         """
             Args:
@@ -209,7 +218,6 @@ class KuavoMsgProcesser:
         """
         state= msg.data.position
         return { "data": state, "timestamp": msg.header.stamp.to_sec() }
-        
     @staticmethod
     def process_claw_cmd(msg):
         position= msg.data.position
@@ -311,6 +319,17 @@ class KuavoRosbagReader:
                 "topic": "/kuavo_arm_traj",
                 "msg_process_fn": self._msg_processer.process_kuavo_arm_traj,
             },
+            # 连续版kauvo_arm_traj,用于task4
+            "action.kuavo_arm_traj_alt": {
+                "topic": "/kuavo_arm_traj_synced",
+                "msg_process_fn": self._msg_processer.process_kuavo_arm_traj,
+            },
+            # 新action：cmd_pos_world，控制位置
+            "action.cmd_pos_world": {
+                "topic": "/cmd_pose_world_synced",
+                "msg_process_fn": self._msg_processer.process_cmd_pos_world,
+            },
+
             "action": {
                 "topic": "/joint_cmd",
                 "msg_process_fn": self._msg_processer.process_joint_cmd,
@@ -466,9 +485,74 @@ class KuavoRosbagReader:
         main_img_timestamps = [t['timestamp'] for t in data[main_timeline]][SAMPLE_DROP:-SAMPLE_DROP][::jump]
         min_end = min([data[k][-1]['timestamp'] for k in data.keys() if len(data[k]) > 0])
         main_img_timestamps = [t for t in main_img_timestamps if t < min_end]
+        
+        # 特殊处理kuavo_arm_traj话题的时间戳连续性检测（可能有断点，需要999处理）
+        def detect_timestamp_gaps(timestamps, gap_threshold=0.15 * 10 / TRAIN_HZ):
+            """检测时间戳中的间隙，返回间隙位置"""
+            if len(timestamps) < 2:
+                return []
+            
+            gaps = []
+            for i in range(1, len(timestamps)):
+                if timestamps[i] - timestamps[i-1] > gap_threshold:
+                    gaps.append(i)
+            return gaps
+        
+        gaps = []
+        # 检查kuavo_arm_traj是否有断点，如果有则进行特殊处理
+        if not ONLY_HALF_UP_BODY and "action.kuavo_arm_traj" in data and len(data["action.kuavo_arm_traj"]) > 0:
+            arm_traj_timestamps = [t['timestamp'] for t in data["action.kuavo_arm_traj"]]
+            gaps = detect_timestamp_gaps(arm_traj_timestamps)
+            
+            # 只有在检测到间隙时才进行特殊处理
+            if len(gaps) > 0:
+                print(f"Detected {len(gaps)} gaps in action.kuavo_arm_traj, applying 999 flag processing")
+                
+                # 获取数据维度
+                data_dim = len(data["action.kuavo_arm_traj"][0]['data'])
+                
+                # 创建完整的时间序列，在间隙处填充999
+                complete_arm_traj_data = []
+                
+                for stamp in main_img_timestamps:
+                    # 检查当前时间戳是否在间隙中
+                    in_gap = False
+                    for gap_idx in gaps:
+                        if gap_idx < len(arm_traj_timestamps) and arm_traj_timestamps[gap_idx] > stamp:
+                            # 检查是否在间隙范围内
+                            if gap_idx > 0 and arm_traj_timestamps[gap_idx-1] < stamp < arm_traj_timestamps[gap_idx]:
+                                in_gap = True
+                                break
+                    
+                    if in_gap:
+                        # 在间隙中，使用999填充
+                        flag_data = np.full(data_dim, 999.0, dtype=np.float32)
+                        complete_arm_traj_data.append({
+                            "data": flag_data,
+                            "timestamp": stamp
+                        })
+                        print(f"Created flag data (999) for action.kuavo_arm_traj at timestamp {stamp}")
+                    else:
+                        # 正常时间戳，使用最近的数据
+                        time_array = np.array(arm_traj_timestamps)
+                        idx = np.argmin(np.abs(time_array - stamp))
+                        complete_arm_traj_data.append(data["action.kuavo_arm_traj"][idx])
+                
+                # 将处理后的数据添加到aligned_data
+                aligned_data["action.kuavo_arm_traj"] = complete_arm_traj_data
+                print(f"Processed action.kuavo_arm_traj with gap detection: {len(complete_arm_traj_data)} frames, {len(gaps)} gaps detected")
+            else:
+                print("No gaps detected in action.kuavo_arm_traj, using normal alignment")
+                # 没有间隙，使用正常对齐逻辑（在下面的循环中处理）
+        
+        # 处理其他话题的正常对齐
         for stamp in main_img_timestamps:
             stamp_sec = stamp
             for key, v in data.items():
+                # 跳过已经特殊处理的kuavo_arm_traj（只有在有间隙时才跳过）
+                if key == "action.kuavo_arm_traj" and len(gaps) > 0:
+                    continue
+                
                 if len(v) > 0:
                     this_obs_time_seq = [this_frame['timestamp'] for this_frame in v]
                     time_array = np.array([t for t in this_obs_time_seq])

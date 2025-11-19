@@ -47,8 +47,8 @@ class Config:
     
     @property
     def only_half_up_body(self) -> bool:
-        """Always true when only using arm."""
-        return True
+        """True when only using arm, False when including base control."""
+        return self.only_arm
     
     @property
     def default_camera_names(self) -> List[str]:

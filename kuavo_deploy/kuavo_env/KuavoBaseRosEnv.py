@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import sys
 import threading
+from kuavo_humanoid_sdk.interfaces import KuavoArmCtrlMode
 import rospy
 import numpy as np
 from cv_bridge import CvBridge
@@ -9,14 +11,16 @@ from std_msgs.msg import Bool
 import cv2
 import gymnasium as gym
 import time
+from scipy.spatial.transform import Rotation as R
 from configs.deploy.config_kuavo_env import load_kuavo_env_config
 import sys
 from kuavo_humanoid_sdk import KuavoSDK,KuavoRobot,KuavoRobotState,DexterousHand
+from sensor_msgs.msg import CompressedImage, JointState
+from std_msgs.msg import Bool
 from kuavo_humanoid_sdk.msg.kuavo_msgs.msg import lejuClawCommand
+from configs.deploy.config_kuavo_env import load_kuavo_env_config
 from kuavo_deploy.utils.logging_utils import setup_logger
-
 import traceback
-# import Rq2f85ClawCmd,Rq2f85ClawState
 
 log_robot = setup_logger("robot")
 
@@ -67,7 +71,7 @@ class KuavoBaseRosEnv(gym.Env):
         self.qiangnao_dof_needed = config_kuavo_env.qiangnao_dof_needed
         self.leju_claw_dof_needed = config_kuavo_env.leju_claw_dof_needed
         self.rq2f85_dof_needed = config_kuavo_env.rq2f85_dof_needed
-        self.arm_init = config_kuavo_env.arm_init
+        self.arm_init = np.array([0]*14)
         self.slice_robot = config_kuavo_env.slice_robot
         self.qiangnao_slice = config_kuavo_env.qiangnao_slice
         self.claw_slice = config_kuavo_env.claw_slice
@@ -80,7 +84,8 @@ class KuavoBaseRosEnv(gym.Env):
         self.arm_max = np.array(self.arm_max)/180*np.pi
         self.eef_min = config_kuavo_env.eef_min
         self.eef_max = config_kuavo_env.eef_max
-
+        self.base_min = config_kuavo_env.base_min
+        self.base_max = config_kuavo_env.base_max
         self.input_images = config_kuavo_env.input_images
 
         self.bridge = CvBridge()
@@ -130,7 +135,46 @@ class KuavoBaseRosEnv(gym.Env):
             self.state = None
             self.start_state = None
         else:
-            raise KeyError("only_arm = False is not supported!")
+            # 包含base控制: include base control (x, y, yaw, flag)
+            base_low = self.base_min
+            base_high = self.base_max
+
+            if self.control_mode == 'joint':
+                if self.which_arm == 'both':
+                    self.arm_joint_dim = 14
+                    arm_action_low = np.concatenate((self.arm_min[:7], self.eef_min, self.arm_min[7:14], self.eef_min), axis=0)
+                    arm_action_high = np.concatenate((self.arm_max[:7], self.eef_max, self.arm_max[7:14], self.eef_max), axis=0)
+                    state_low = np.concatenate((self.arm_min[:7], self.eef_min, self.arm_min[7:14], self.eef_min), axis=0)
+                    state_high = np.concatenate((self.arm_max[:7], self.eef_max, self.arm_max[7:14], self.eef_max), axis=0)
+                elif self.which_arm == 'left':
+                    self.arm_joint_dim = 7
+                    arm_action_low = np.concatenate((self.arm_min[:7], self.eef_min), axis=0)
+                    arm_action_high = np.concatenate((self.arm_max[:7], self.eef_max), axis=0)
+                    state_low = np.concatenate((self.arm_min[:7], self.eef_min), axis=0)
+                    state_high = np.concatenate((self.arm_max[:7], self.eef_max), axis=0)
+                elif self.which_arm == 'right':
+                    self.arm_joint_dim = 7
+                    arm_action_low = np.concatenate((self.arm_min[7:], self.eef_min), axis=0)
+                    arm_action_high = np.concatenate((self.arm_max[7:], self.eef_max), axis=0)
+                    state_low = np.concatenate((self.arm_min[7:], self.eef_min), axis=0)
+                    state_high = np.concatenate((self.arm_max[7:], self.eef_max), axis=0)
+            elif self.control_mode == 'eef':
+                raise KeyError("control_mode = 'eef' is not supported!")
+                # self.action_space = gym.spaces.Box(low=-np.inf, high=np.inf, shape=(14,))
+            action_low = np.concatenate((arm_action_low, base_low), axis=0)
+            action_high = np.concatenate((arm_action_high, base_high), axis=0)
+            self.action_space = gym.spaces.Box(low=action_low, high=action_high, shape=(len(action_low),), dtype=np.float64)
+
+
+            self.observation_space = gym.spaces.Dict({
+                        "observation.state": gym.spaces.Box(low=state_low, high=state_high, shape=(len(state_low),)),
+                        })
+            height,width = self.image_size
+            for image in self.input_images:
+                if 'depth' in image:
+                    self.observation_space[f"observation.{image}"] = gym.spaces.Box(0, 65535, shape=(1,height,width), dtype=np.uint16)
+                else:
+                    self.observation_space[f"observation.images.{image}"] = gym.spaces.Box(0, 255, shape=(height,width,3), dtype=np.uint8)
         
         self.init_kuavo_sdk()
         self.initial_topics()
@@ -142,15 +186,16 @@ class KuavoBaseRosEnv(gym.Env):
             time.sleep(1)
         log_robot.info(f"Inializing done!")
 
-    # 推荐的初始化方式
-    def safe_init_node(self):
-        try:
-            rospy.init_node('kuavo_base_ros_env', anonymous=True)
-            log_robot.info("Node initialized successfully!")
-            return True
-        except rospy.ROSException as e:
-            log_robot.error(f"Node initialization failed: {e}")
-            return False
+
+    # # 推荐的初始化方式
+    # def safe_init_node(self):
+    #     try:
+    #         rospy.init_node('kuavo_base_ros_env', anonymous=True)
+    #         log_robot.info("Node initialized successfully!")
+    #         return True
+    #     except rospy.ROSException as e:
+    #         log_robot.error(f"Node initialization failed: {e}")
+    #         return False
 
     def init_kuavo_sdk(self):
         if not KuavoSDK().Init():  # Init! !!! IMPORTANT !!!
@@ -163,34 +208,33 @@ class KuavoBaseRosEnv(gym.Env):
         
         self.rate = rospy.Rate(self.ros_rate)
         
-        if self.only_arm:
-            # ROS subscribers
-            rospy.Subscriber("/cam_h/color/image_raw/compressed", CompressedImage, self.cam_h_callback)
-            rospy.Subscriber("/cam_l/color/image_raw/compressed", CompressedImage, self.cam_l_callback)
-            rospy.Subscriber("/cam_r/color/image_raw/compressed", CompressedImage, self.cam_r_callback)
-            rospy.Subscriber("/cam_h/depth/image_raw/compressedDepth", CompressedImage, self.cam_h_depth_callback)
-            rospy.Subscriber("/cam_l/depth/image_rect_raw/compressedDepth", CompressedImage, self.cam_l_depth_callback)
-            rospy.Subscriber("/cam_r/depth/image_rect_raw/compressedDepth", CompressedImage, self.cam_r_depth_callback)
-            
-            if not self.real:
-                rospy.Subscriber("/gripper/state", JointState, self.gripper_state_callback)
-                # rospy.Subscriber("/F_state", JointState, self.F_state_callback)
-
-                # ROS publishers
-                if self.eef_type == 'rq2f85':
-                    self.pub_eef_joint = rospy.Publisher('/gripper/command', JointState, queue_size=10)
-                elif self.eef_type == 'leju_claw':
-                    self.pub_eef_joint = rospy.Publisher('/claw_cmd', JointState, queue_size=10)
-                elif self.eef_type == 'qiangnao':
-                    raise KeyError("qiangnao is not supported!")
-            else:
-                # ROS subscribers
-                
-                if self.eef_type == 'leju_claw':
-                    self.lejuclaw = LejuClaw()
-                elif self.eef_type == 'qiangnao':
-                    self.qiangnao = DexterousHand()
+        # ROS subscribers
+        rospy.Subscriber("/cam_h/color/image_raw/compressed", CompressedImage, self.cam_h_callback)
+        rospy.Subscriber("/cam_l/color/image_raw/compressed", CompressedImage, self.cam_l_callback)
+        rospy.Subscriber("/cam_r/color/image_raw/compressed", CompressedImage, self.cam_r_callback)
+        rospy.Subscriber("/cam_h/depth/image_raw/compressedDepth", CompressedImage, self.cam_h_depth_callback)
+        rospy.Subscriber("/cam_l/depth/image_rect_raw/compressedDepth", CompressedImage, self.cam_l_depth_callback)
+        rospy.Subscriber("/cam_r/depth/image_rect_raw/compressedDepth", CompressedImage, self.cam_r_depth_callback)
         
+        if not self.real:
+            rospy.Subscriber("/gripper/state", JointState, self.gripper_state_callback)
+            # rospy.Subscriber("/F_state", JointState, self.F_state_callback)
+
+        # ROS publishers
+        if self.eef_type == 'rq2f85':
+            self.pub_eef_joint = rospy.Publisher('/gripper/command', JointState, queue_size=10)
+        elif self.eef_type == 'leju_claw':
+            self.pub_eef_joint = rospy.Publisher('/claw_cmd', JointState, queue_size=10)
+        elif self.eef_type == 'qiangnao':
+            raise KeyError("qiangnao is not supported!")
+    # else:
+        # ROS subscribers
+        
+        if self.eef_type == 'leju_claw':
+            self.lejuclaw = LejuClaw()
+        elif self.eef_type == 'qiangnao':
+            self.qiangnao = DexterousHand()
+
     def compute_reward(self):
         return 0
 
@@ -204,28 +248,27 @@ class KuavoBaseRosEnv(gym.Env):
             "/sensors_data_raw": "kuavo_msgs/sensorsData",
         }
         
-        if self.only_arm:
-            topics.update({
-                "/cam_h/color/image_raw/compressed": "CompressedImage",
-                "/cam_l/color/image_raw/compressed": "CompressedImage",
-                "/cam_r/color/image_raw/compressed": "CompressedImage",
-                "/cam_h/depth/image_raw/compressedDepth": "CompressedImage",
-                "/cam_l/depth/image_rect_raw/compressedDepth": "CompressedImage", 
-                "/cam_r/depth/image_rect_raw/compressedDepth": "CompressedImage"
-            })
-            
-            if not self.real:
-                if self.eef_type == 'rq2f85':
-                    topics["/gripper/state"] = "sensor_msgs/JointState"
-                elif self.eef_type == 'leju_claw':
-                    topics["/leju_claw_state"] = "kuavo_msgs/lejuClawState"
-                elif self.eef_type == 'qiangnao':
-                    topics["/dexhand/state"] = "sensor_msgs/JointState"
-            else:
-                if self.eef_type == 'leju_claw':
-                    topics["/leju_claw_state"] = "kuavo_msgs/lejuClawState"
-                elif self.eef_type == 'qiangnao':
-                    topics["/dexhand/state"] = "sensor_msgs/JointState"
+        topics.update({
+            "/cam_h/color/image_raw/compressed": "CompressedImage",
+            "/cam_l/color/image_raw/compressed": "CompressedImage",
+            "/cam_r/color/image_raw/compressed": "CompressedImage",
+            "/cam_h/depth/image_raw/compressedDepth": "CompressedImage",
+            "/cam_l/depth/image_rect_raw/compressedDepth": "CompressedImage", 
+            "/cam_r/depth/image_rect_raw/compressedDepth": "CompressedImage"
+        })
+        
+        if not self.real:
+            if self.eef_type == 'rq2f85':
+                topics["/gripper/state"] = "sensor_msgs/JointState"
+            elif self.eef_type == 'leju_claw':
+                topics["/leju_claw_state"] = "kuavo_msgs/lejuClawState"
+            elif self.eef_type == 'qiangnao':
+                topics["/dexhand/state"] = "sensor_msgs/JointState"
+        else:
+            if self.eef_type == 'leju_claw':
+                topics["/leju_claw_state"] = "kuavo_msgs/lejuClawState"
+            elif self.eef_type == 'qiangnao':
+                topics["/dexhand/state"] = "sensor_msgs/JointState"
         
         log_robot.info(f"检查ROS话题 ({len(topics)}个):")
         log_robot.info("=" * 50)
@@ -310,19 +353,71 @@ class KuavoBaseRosEnv(gym.Env):
         self.start_state = self.start_state / average_num
 
         obs = self.get_obs()
+        self.sleep_time = 0
+        self.average_sleep_time = 0
+
         return obs, {}
 
+    def check_action(self, action, mode='default'):
+        # return action
+        if mode == 'default': # 比较action_space
+            if len(action)!=len(self.action_space.low):
+                raise ValueError(f"action shape must be {len(self.action_space.low)}")
+            if np.any(action<self.action_space.low) or np.any(action>self.action_space.high):
+                log_robot.warning(f"action out of range, action: {action}, action_space.low: {self.action_space.low}, action_space.high: {self.action_space.high}")
+                action = np.clip(action, self.action_space.low, self.action_space.high)
+        return action
+
     def step(self, action):
+        start_time = time.time()
         # Execute action
         log_robot.info(f"action: {action}")
         # arm action in rad, eef action in 0-1
-        action = np.clip(action, self.action_space.low, self.action_space.high) # 限制动作范围 
+        action = np.clip(action, self.action_space.low, self.action_space.high) # 限制动作范围
+        action = self.check_action(action, mode='default') 
         log_robot.info(f"clip action: {action}")
+        check_time = time.time()
+        log_robot.info(f"check time: {check_time - start_time:.3f}s")
+
+        if not self.only_arm:
+            # 获取action中base移动相关的部分（最后4个值），最后一位用于判断是移动还是手部动作
+            base_action = action[-4:]
+            move_flag = base_action[-1]  # 0-1之间的值，用于判断是否执行base移动
+            
+            # 添加详细日志
+            log_robot.info(f"🚦 mode_flag = {move_flag:.4f}")
+            log_robot.info(f"   cmd_pos_world = [x:{base_action[0]:.4f}, y:{base_action[1]:.4f}, yaw:{base_action[2]:.4f}]")
+            
+            if move_flag > 0.5:  # 如果大于0.5，执行base移动
+                log_robot.info(f"   ➡️  执行【底盘移动】(mode_flag > 0.5)")
+                self.robot.control_command_pose_world(base_action[0], base_action[1], 0, base_action[2])
+                self.rate.sleep()
+                self.sleep_time = time.time()-check_time
+                self.average_sleep_time += self.sleep_time
+                log_robot.info(f"rate.sleep time: {self.sleep_time:.3f}s")
+                return self.get_obs(), 0, False, False, {}
+            else:
+                log_robot.info(f"   ✋ 执行【手臂动作】(mode_flag <= 0.5)")
+            
+            action = action[:-4]
+
+        eef_time = time.time()
+        log_robot.info(f"arm action: {action}")
+        log_robot.info(f"eef time: {eef_time-check_time:.3f}s")
+
         self.exec_action(action)
+
         self.rate.sleep()
         
+        sleep_time = time.time()
+        self.sleep_time = sleep_time - eef_time
+        self.average_sleep_time += self.sleep_time
+        log_robot.info(f"rate.sleep time: {self.sleep_time:.3f}s")
+
         # Get new observation
         obs = self.get_obs()
+        get_obs_time = time.time()
+        log_robot.info(f"get obs time: {get_obs_time-sleep_time:.3f}s")
         
         # Simplified reward and termination
         reward = self.compute_reward()
@@ -467,8 +562,91 @@ class KuavoBaseRosEnv(gym.Env):
                             raise KeyError("qiangnao_dof_needed != 1 is not supported!")
                 else:
                     raise KeyError("which_arm != 'left' or 'right' or 'both' is not supported!")
-        else:
-            raise KeyError("only_arm = False is not supported!")
+        else:# 全身逻辑
+            if self.which_arm == 'both':
+                target_position = np.concatenate((action[:7], action[8:15]), axis=0)
+                try:
+                    self.robot.control_arm_joint_positions(target_position)
+                except RuntimeError as e:
+                # 当机器人处于 command_pose_world 状态（底盘移动）时，无法控制手臂
+                    if "must be in stance state" in str(e):
+                        log_robot.warning(f"⚠️  无法发送手臂命令：机器人当前状态不允许 (可能正在底盘移动)")
+                        log_robot.debug(f"   详细错误: {e}")
+                    else:
+                        raise
+                if self.eef_type == 'rq2f85':
+                    eef_msg = JointState()
+                    eef_msg.name = ['left_gripper_joint','right_gripper_joint']
+                    eef_msg.position = np.concatenate(([action[7]*255], [action[15]*255]), axis=0)
+                    self.pub_eef_joint.publish(eef_msg)
+                elif self.eef_type == 'leju_claw':                     
+                    target_positions = [action[7]*100, action[15]*100]
+                    self.lejuclaw.control(target_positions=target_positions)
+                elif self.eef_type == 'qiangnao':
+                    if self.qiangnao_dof_needed == 1:
+                        tem_left = action[7]*100
+                        tem_right = action[15]*100
+                        target_positions = np.concatenate(([tem_left], [100], [tem_left]*4,[tem_right], [100], [tem_right]*4), axis=0)
+                        self.qiangnao.control(target_positions=target_positions)
+                    else:
+                        raise KeyError("qiangnao_dof_needed != 1 is not supported!")
+            elif self.which_arm == 'left':
+                target_position = np.concatenate((action[:7], self.arm_init[7:14]), axis=0)
+                try:
+                    self.robot.control_arm_joint_positions(target_position)
+                except RuntimeError as e:
+                    # 当机器人处于 command_pose_world 状态（底盘移动）时，无法控制手臂
+                    if "must be in stance state" in str(e):
+                        log_robot.warning(f"⚠️  无法发送手臂命令：机器人当前状态不允许 (可能正在底盘移动)")
+                        log_robot.debug(f"   详细错误: {e}")
+                    else:
+                        raise
+                if self.eef_type == 'rq2f85':
+                    eef_msg = JointState()
+                    eef_msg.name = ['left_gripper_joint','right_gripper_joint']
+                    eef_msg.position = np.concatenate(([action[7]*255], [0]), axis=0)
+                    self.pub_eef_joint.publish(eef_msg)
+                elif self.eef_type == 'leju_claw':
+                    target_positions = [action[7]*100, 0]
+                    self.lejuclaw.control(target_positions=target_positions)
+                elif self.eef_type == 'qiangnao':
+                    if self.qiangnao_dof_needed == 1:
+                        tem_left = action[7]*100
+                        tem_right = 0
+                        target_positions = np.concatenate(([tem_left], [100], [tem_left]*4,[tem_right], [100], [tem_right]*4), axis=0)
+                        self.qiangnao.control(target_positions=target_positions)
+                    else:
+                        raise KeyError("qiangnao_dof_needed != 1 is not supported!")
+
+            elif self.which_arm == 'right':
+                target_position = np.concatenate((self.arm_init[:7],action[:7]), axis=0)
+                try:
+                    self.robot.control_arm_joint_positions(target_position)
+                except RuntimeError as e:
+                    # 当机器人处于 command_pose_world 状态（底盘移动）时，无法控制手臂
+                    if "must be in stance state" in str(e):
+                        log_robot.warning(f"⚠️  无法发送手臂命令：机器人当前状态不允许 (可能正在底盘移动)")
+                        log_robot.debug(f"   详细错误: {e}")
+                    else:
+                        raise
+                if self.eef_type == 'rq2f85':
+                    eef_msg = JointState()
+                    eef_msg.name = ['left_gripper_joint','right_gripper_joint']
+                    eef_msg.position = np.concatenate(([0], [action[15]*255]), axis=0)
+                    self.pub_eef_joint.publish(eef_msg)
+                elif self.eef_type == 'leju_claw':
+                    target_positions = [0, action[7]*100]
+                    self.lejuclaw.control(target_positions=target_positions)
+                elif self.eef_type == 'qiangnao':
+                    if self.qiangnao_dof_needed == 1:
+                        tem_left = 0
+                        tem_right = action[7]*100
+                        target_positions = np.concatenate(([tem_left], [100], [tem_left]*4,[tem_right], [100], [tem_right]*4), axis=0)
+                        self.qiangnao.control(target_positions=target_positions)
+                    else:
+                        raise KeyError("qiangnao_dof_needed != 1 is not supported!")
+            else:
+                raise KeyError("which_arm != 'left' or 'right' or 'both' is not supported!")
 
     def get_obs(self):
         self.joint_q = self.robot_state.arm_joint_state().position
@@ -486,30 +664,29 @@ class KuavoBaseRosEnv(gym.Env):
             else:
                 self.eef_state = self.eef_state/0.8
 
-        if self.only_arm:
-            if self.which_arm == 'both':
-                if self.eef_type == 'rq2f85':
-                    self.state = np.concatenate((self.joint_q[:7], self.eef_state[:self.rq2f85_dof_needed],self.joint_q[7:],self.eef_state[-self.rq2f85_dof_needed:]), axis=0)
-                elif self.eef_type == 'qiangnao':
-                    self.state = np.concatenate((self.joint_q[:7], self.eef_state[:self.qiangnao_dof_needed],self.joint_q[7:],self.eef_state[-self.qiangnao_dof_needed:]), axis=0)
-                elif self.eef_type == 'leju_claw':
-                    self.state = np.concatenate((self.joint_q[:7], self.eef_state[:self.leju_claw_dof_needed],self.joint_q[7:],self.eef_state[-self.leju_claw_dof_needed:]), axis=0)
-            elif self.which_arm == 'left':
-                if self.eef_type == 'rq2f85':
-                    self.state = np.concatenate((self.joint_q[:7], self.eef_state[:self.rq2f85_dof_needed]), axis=0)
-                elif self.eef_type == 'qiangnao':
-                    self.state = np.concatenate((self.joint_q[:7], self.eef_state[:self.qiangnao_dof_needed]), axis=0)
-                elif self.eef_type == 'leju_claw':
-                    self.state = np.concatenate((self.joint_q[:7], self.eef_state[:self.leju_claw_dof_needed]), axis=0)
-            elif self.which_arm == 'right':
-                if self.eef_type == 'rq2f85':
-                    self.state = np.concatenate((self.joint_q[7:], self.eef_state[-self.rq2f85_dof_needed:]), axis=0)
-                elif self.eef_type == 'qiangnao':
-                    self.state = np.concatenate((self.joint_q[7:], self.eef_state[-self.qiangnao_dof_needed:]), axis=0)
-                elif self.eef_type == 'leju_claw':
-                    self.state = np.concatenate((self.joint_q[7:], self.eef_state[-self.leju_claw_dof_needed:]), axis=0)
-            else:
-                raise KeyError("which_arm != 'left' or 'right' or 'both' is not supported!")
+        if self.which_arm == 'both':
+            if self.eef_type == 'rq2f85':
+                self.state = np.concatenate((self.joint_q[:7], self.eef_state[:self.rq2f85_dof_needed],self.joint_q[7:],self.eef_state[-self.rq2f85_dof_needed:]), axis=0)
+            elif self.eef_type == 'qiangnao':
+                self.state = np.concatenate((self.joint_q[:7], self.eef_state[:self.qiangnao_dof_needed],self.joint_q[7:],self.eef_state[-self.qiangnao_dof_needed:]), axis=0)
+            elif self.eef_type == 'leju_claw':
+                self.state = np.concatenate((self.joint_q[:7], self.eef_state[:self.leju_claw_dof_needed],self.joint_q[7:],self.eef_state[-self.leju_claw_dof_needed:]), axis=0)
+        elif self.which_arm == 'left':
+            if self.eef_type == 'rq2f85':
+                self.state = np.concatenate((self.joint_q[:7], self.eef_state[:self.rq2f85_dof_needed]), axis=0)
+            elif self.eef_type == 'qiangnao':
+                self.state = np.concatenate((self.joint_q[:7], self.eef_state[:self.qiangnao_dof_needed]), axis=0)
+            elif self.eef_type == 'leju_claw':
+                self.state = np.concatenate((self.joint_q[:7], self.eef_state[:self.leju_claw_dof_needed]), axis=0)
+        elif self.which_arm == 'right':
+            if self.eef_type == 'rq2f85':
+                self.state = np.concatenate((self.joint_q[7:], self.eef_state[-self.rq2f85_dof_needed:]), axis=0)
+            elif self.eef_type == 'qiangnao':
+                self.state = np.concatenate((self.joint_q[7:], self.eef_state[-self.qiangnao_dof_needed:]), axis=0)
+            elif self.eef_type == 'leju_claw':
+                self.state = np.concatenate((self.joint_q[7:], self.eef_state[-self.leju_claw_dof_needed:]), axis=0)
+        else:
+            raise KeyError("which_arm != 'left' or 'right' or 'both' is not supported!")
 
         obs = {"observation.state": self.state}
         for image in self.input_images:

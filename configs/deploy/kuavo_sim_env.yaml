@@ -9,7 +9,7 @@ hydra:  # Hydra 配置文件保存目录，仅供参数检查使用
 # env config，仿真器运行配置文件
 real: false # 是否使用真实机器人，仿真环境为false
 
-only_arm: true  # 默认true, 是否只使用手臂数据, 目前的模仿学习只用于手臂数据，选择true会自动屏蔽足关节数据
+only_arm: true  # 默认true, 是否只使用手臂数据, !!!!!!!!!task4请设置为false,task4请设置为false,task4请设置为false!!!!!!!!!
 eef_type: rq2f85  # 末端执行器类型: 仿真选择：rq2f85, 真机可选：leju_claw, qiangnao
 control_mode: joint # or eef（暂未支持）
 which_arm: both  # 需要哪一只手臂的数据，可选: left, right, both，注意这会同时选择对应手臂的相机，已默认包含头部相机
@@ -54,6 +54,9 @@ arm_max: [180,180,180,180,180,180,180,180,180,180,180,180,180,180]
 eef_min: [0] # 末端执行器最小角度
 eef_max: [1] # 末端执行器最大角度
 
+base_min: [-2.0, -2.0, -3.14, 0]
+base_max: [2.0, 2.0, 3.14, 1]
+
 is_binary: false # 是否使用二值化夹爪，灵巧手，default=false
 
 
@@ -70,7 +73,7 @@ device: "cuda"  # or "cpu"
 task: "your_task"
 method: "your_method"
 timestamp: "your_timestamp"
-epoch: 10  # 使用训练保存的哪一个epoch。注意：代码将在outputs/<task>/<method>/run_<timestamp>/epoch10中load policy的模型参数
-max_episode_steps: 500  # 最大回合步数，超过自动结束，根据任务所需时长调整
+epoch: 1  # 使用训练保存的哪一个epoch。注意：代码将在outputs/<task>/<method>/run_<timestamp>/epoch10中load policy的模型参数
+max_episode_steps: 500  # 最大回合步数，超过自动结束，根据任务所需时长调整，task4设置为800一般足够，请根据调试中可满足任务结束的时间调整
 env_name: Kuavo-Sim  # kuavo仿真器环境名称
 
