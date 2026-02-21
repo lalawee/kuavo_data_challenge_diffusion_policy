@@ -110,7 +110,7 @@ policy:
 
     # 图像裁剪，（lerobot内有的策略不支持）
     crop_is_random: True
-    crop_shape: [420, 560]  #  [84, 84]
+    crop_shape: [224, 224]  #  [84, 84]
 
     use_amp: True  # 是否使用混合精度训练
 

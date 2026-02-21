@@ -67,10 +67,37 @@ eval_episodes: 1  # 测试回合数，真机默认为1
 seed: 42  # 随机种子，真机中仅模型状态可固定，
 start_seed: 42  # 回合开始时的随机种子，真机中仅模型状态可固定
 device: "cuda"  # or "cpu"
-task: "your_task"
-method: "your_method"
-timestamp: "your_timestamp"
+task: "use_left_hand_pour"
+method: "diffusion_3views_vanilla"
+timestamp: "run_20260221_000807"
 epoch: 10  # 使用训练保存的哪一个epoch。注意：代码将在outputs/<task>/<method>/run_<timestamp>/epoch10中load policy的模型参数
 max_episode_steps: 500  # 最大回合步数，超过自动结束
 env_name: Kuavo-Real  # kuavo真机环境名称
+
+
+
+# Map robot camera names -> training observation keys
+obs_key_map:
+  head_cam_h: "observation.images.ego_view"
+  wrist_cam_l: "observation.images.left_wrist_view"
+  wrist_cam_r: "observation.images.right_wrist_view"
+
+# If your robot uses different names for state/action keys, you can map those too.
+state_key_in: "observation.state"
+action_key_out: "action"
+
+# Optional: choose what the SERVER returns
+# - "delta": return Δq (robot integrates) (not yet supported for real robot, only for simulation)
+# - "absolute": return absolute joint positions (robot directly goes to these positions)
+delta_output_mode: "absolute"
+
+
+# Your training images were 256x256; robot images can be resized to this:
+model_image_size: [256, 256]
+
+# If a required model camera is missing:
+missing_camera_policy: "error"          # or "duplicate:head_cam_h"
+
+# Optional: clip delta values (only applied when use_delta: true)
+delta_clip: 0.1
 

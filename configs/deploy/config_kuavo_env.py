@@ -36,6 +36,15 @@ class Config_Kuavo_Env:
 
     # Input features
     input_images: List[str]
+
+
+
+    # in Config_Kuavo_Env dataclass
+    obs_key_map: Dict[str, str] | None = None
+    state_key_in: str = "observation.state"
+    action_key_out: str = "action"
+    delta_output_mode: str = "absolute"  # "delta" or "absolute"
+
     
     @property
     def use_leju_claw(self) -> bool:
@@ -148,6 +157,10 @@ def load_kuavo_env_config(config_path: str = None) -> Config_Kuavo_Env:
         eef_max=config_dict['eef_max'],
         is_binary=config_dict['is_binary'],
         input_images=config_dict['input_images'],
+        obs_key_map=config_dict.get('obs_key_map', None),
+        state_key_in=config_dict.get('state_key_in', "observation.state"),
+        action_key_out=config_dict.get('action_key_out', "action"),
+        delta_output_mode=config_dict.get('delta_output_mode', "absolute")
     )
 
 if __name__ == "__main__":

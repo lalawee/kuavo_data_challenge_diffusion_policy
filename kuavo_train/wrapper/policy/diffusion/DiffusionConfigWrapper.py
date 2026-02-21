@@ -69,12 +69,58 @@ class CustomDiffusionConfigWrapper(DiffusionConfig):
 
     @property
     def image_features(self) -> dict[str, PolicyFeature]:
-        return {key: ft for key, ft in self.input_features.items() if (ft.type is FeatureType.RGB) or (ft.type is FeatureType.VISUAL)}
-    
+        """
+        Returns only image-type features from self.input_features.
+
+        IMPORTANT:
+        Different versions of LeRobot define FeatureType differently.
+        Some versions include:
+            - FeatureType.VISUAL
+            - FeatureType.RGB
+        Others may only include:
+            - FeatureType.VISUAL
+
+        Directly referencing FeatureType.RGB can raise:
+            AttributeError: RGB
+        if that enum member does not exist in the installed version.
+
+        Therefore, we avoid accessing FeatureType.RGB directly.
+        Instead, we check the enum name safely using getattr.
+        This makes the wrapper compatible across multiple LeRobot versions.
+        """
+        def _ft_name(ft_type):
+            # Works across different lerobot versions
+            return getattr(ft_type, "name", str(ft_type))
+
+        return {
+            key: ft
+            for key, ft in self.input_features.items()
+            if _ft_name(ft.type) in ("VISUAL", "RGB")
+        }
+
     @property
     def depth_features(self) -> dict[str, PolicyFeature]:
-        return {key: ft for key, ft in self.input_features.items() if ft.type is FeatureType.DEPTH}
-    
+        """
+        Returns only depth-type features from self.input_features.
+
+        IMPORTANT:
+        Some versions of LeRobot define FeatureType.DEPTH,
+        but others do not include DEPTH as a separate enum value.
+
+        Referencing FeatureType.DEPTH directly can raise:
+            AttributeError: DEPTH
+
+        To maintain compatibility across versions, we check the enum name
+        instead of directly accessing FeatureType.DEPTH.
+        """
+        def _ft_name(ft_type):
+            return getattr(ft_type, "name", str(ft_type))
+
+        return {
+            key: ft
+            for key, ft in self.input_features.items()
+            if _ft_name(ft.type) == "DEPTH"
+        }
 
     def validate_features(self) -> None:
         if len(self.image_features) == 0 and self.env_state_feature is None:
